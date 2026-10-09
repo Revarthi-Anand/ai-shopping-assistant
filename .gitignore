@@ -1,0 +1,20 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Secrets
+.env
+
+# Node / React
+node_modules/
+dist/
+build/
+
+# Database and vector store files
+chroma_db/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/
