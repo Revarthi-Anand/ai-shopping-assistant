@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from database import products_collection
 from llm import ask_llm
+from rag import search_products
 
 app = FastAPI(title="AI Shopping Assistant")
 
@@ -38,17 +39,22 @@ class AskRequest(BaseModel):
 
 @app.post("/ask")
 def ask(req: AskRequest):
-    products = list(products_collection.find({}, {"_id": 0}))
-    catalog = "\n".join(
-        f"- {p['name']} | Rs {p['price']} | {p['category']} | rating {p['rating']} | {p['description']}"
-        for p in products
+    # 1. RETRIEVE: find the most relevant products by meaning
+    matches = search_products(req.question, n_results=4)
+
+    # 2. AUGMENT: put only those products into the prompt
+    context = "\n".join(
+        f"- {m['text']} | Rs {m['price']} | rating {m['rating']}" for m in matches
     )
     system = (
-        "You are a shopping assistant. Recommend ONLY products from the catalog provided. "
-        "If nothing fits, say so honestly. Always mention the price in rupees."
+        "You are a shopping assistant. Use ONLY the retrieved products below. "
+        "Recommend the ones that genuinely fit the customer's need and budget, "
+        "and ignore any that don't. If none fit, say so honestly. "
+        "Always mention the price in rupees."
     )
-    prompt = f"Catalog:\n{catalog}\n\nCustomer question: {req.question}"
+    prompt = f"Retrieved products:\n{context}\n\nCustomer question: {req.question}"
 
+    # 3. GENERATE: the LLM writes the answer
     try:
         answer = ask_llm(prompt, system)
     except Exception:
@@ -56,4 +62,4 @@ def ask(req: AskRequest):
             status_code=503,
             detail="The AI service is busy right now. Please try again in a moment.",
         )
-    return {"answer": answer}
+    return {"answer": answer, "sources": [m["name"] for m in matches]}
