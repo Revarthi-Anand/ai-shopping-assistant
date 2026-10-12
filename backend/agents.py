@@ -1,6 +1,9 @@
+import json
 from dataclasses import dataclass
 from llm import ask_llm
 from rag import search_products
+
+VALID_CATEGORIES = ["Electronics", "Footwear", "Accessories", "Clothing", "Home"]
 
 
 @dataclass
@@ -9,9 +12,21 @@ class Agent:
     role: str            # the agent's instructions (its system prompt)
     n_results: int = 4   # how many products its search tool fetches
 
-    def run(self, question: str) -> dict:
-        # Tool: semantic product search
-        matches = search_products(question, n_results=self.n_results)
+    def run(self, question: str, filters: dict | None = None) -> dict:
+        filters = filters or {}
+
+        # Tool: semantic product search with hard filters
+        matches = search_products(question, n_results=self.n_results, **filters)
+
+        if not matches:
+            return {
+                "agent": self.name,
+                "answer": "I couldn't find any products matching that request and budget. "
+                          "Try raising the budget or describing what you need differently.",
+                "sources": [],
+                "filters": filters,
+            }
+
         context = "\n".join(
             f"- {m['text']} | Rs {m['price']} | rating {m['rating']}" for m in matches
         )
@@ -21,6 +36,7 @@ class Agent:
             "agent": self.name,
             "answer": answer,
             "sources": [m["name"] for m in matches],
+            "filters": filters,
         }
 
 
@@ -29,7 +45,7 @@ AGENTS = {
         name="Recommendation Agent",
         role=(
             "You are a personal shopping advisor. Use ONLY the retrieved products. "
-            "Recommend those that genuinely fit the customer's need and budget, ignore the rest, "
+            "Recommend those that genuinely fit the customer's need, ignore the rest, "
             "and give the price in rupees. Name one top pick. If nothing fits, say so honestly."
         ),
         n_results=4,
@@ -54,23 +70,39 @@ AGENTS = {
     ),
 }
 
-ROUTER_PROMPT = (
-    "You are the router of a shopping assistant. Read the customer's message and choose ONE agent:\n"
-    "- recommend: wants suggestions, gift ideas, or products for a need or budget\n"
-    "- compare: wants to compare products, or asks which is better\n"
-    "- qa: asks a specific question about a product's features\n"
-    "Reply with ONLY one word: recommend, compare, or qa."
+PLANNER_PROMPT = (
+    "You are the planner of a shopping assistant. Read the customer's message and reply with "
+    "ONLY a JSON object, no other text, with these keys:\n"
+    '"agent": one of "recommend" (wants suggestions, gift ideas, or products for a need), '
+    '"compare" (wants products compared, or asks which is better), '
+    '"qa" (asks a specific question about one product\'s features).\n'
+    '"max_price": a number in rupees if the customer states a budget, otherwise null.\n'
+    '"category": one of Electronics, Footwear, Accessories, Clothing, Home ONLY if the customer '
+    "clearly names that type of product, otherwise null."
 )
 
 
-def route(question: str) -> str:
-    choice = ask_llm(question, ROUTER_PROMPT).strip().lower()
-    for key in AGENTS:
-        if key in choice:
-            return key
-    return "recommend"   # safe default
+def plan(question: str):
+    """One LLM call that picks the agent AND extracts search filters."""
+    raw = ask_llm(question, PLANNER_PROMPT)
+    raw = raw.replace("```json", "").replace("```", "").strip()
+    try:
+        data = json.loads(raw)
+    except Exception:
+        data = {}
+
+    agent_key = data.get("agent") if data.get("agent") in AGENTS else "recommend"
+
+    filters = {}
+    price = data.get("max_price")
+    if isinstance(price, (int, float)) and not isinstance(price, bool):
+        filters["max_price"] = price
+    if data.get("category") in VALID_CATEGORIES:
+        filters["category"] = data["category"]
+
+    return agent_key, filters
 
 
 def handle(question: str) -> dict:
-    agent_key = route(question)
-    return AGENTS[agent_key].run(question)
+    agent_key, filters = plan(question)
+    return AGENTS[agent_key].run(question, filters)
